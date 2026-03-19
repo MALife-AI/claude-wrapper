@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:fred.stlouisfed.org)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo \"[WebSearch] $(date +%H:%M:%S): $CLAUDE_TOOL_INPUT\" >> /tmp/claude-api.log"
+          }
+        ]
+      }
+    ]
+  }
+}
