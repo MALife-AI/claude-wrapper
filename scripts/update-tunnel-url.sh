@@ -54,7 +54,13 @@ fi
 # index.html 한 줄 교체
 sed -i -E "s|window\\.CLAUDE_WRAPPER_URL\\s*=\\s*'[^']+'|window.CLAUDE_WRAPPER_URL = '$URL'|" "$INDEX_HTML"
 
-echo "updated CLAUDE_WRAPPER_URL → $URL"
+# 캐시 버스터: 로컬 JS/CSS 자산의 ?v=<timestamp> 갱신.
+# 브라우저가 index.html은 no-cache로 못 캐시하지만, 옛 자산을 디스크 캐시에서
+# 끌어쓸 가능성을 막기 위해 새 deploy마다 쿼리를 바꿔준다.
+TS=$(date +%s)
+sed -i -E "s#(app\\.js|chatbot\\.js|financial\\.js|variance\\.js|style\\.css)(\\?v=[0-9]+)?\"#\\1?v=$TS\"#g" "$INDEX_HTML"
+
+echo "updated CLAUDE_WRAPPER_URL → $URL (cache-buster v=$TS)"
 
 # Auto-commit/push: index.html 한 파일만 origin/main에 반영해 GitHub Pages 재배포 트리거.
 # 실패해도 wrapper/cloudflared는 계속 동작해야 하므로 stderr 경고 후 0 반환.
