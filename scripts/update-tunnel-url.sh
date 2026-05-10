@@ -17,13 +17,24 @@ set -euo pipefail
 
 INDEX_HTML="/home/ec2-user/Actuarial-Report/index.html"
 
-URL=$(sudo journalctl -u cloudflared-tunnel.service --no-pager -n 200 \
-  | grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" \
-  | tail -1)
+# 현재 동작 중인 cloudflared 프로세스의 로그만 봐야 함.
+# (재시작 backoff 중 이전 실패 시도가 남긴 stale URL을 잡지 않기 위해)
+# 최대 60초까지 polling.
+URL=""
+for _ in $(seq 1 60); do
+  PID=$(systemctl show -p MainPID --value cloudflared-tunnel.service 2>/dev/null || echo 0)
+  if [ -n "$PID" ] && [ "$PID" != "0" ]; then
+    URL=$(journalctl _PID="$PID" --no-pager 2>/dev/null \
+      | grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" \
+      | tail -1 || true)
+  fi
+  [ -n "$URL" ] && break
+  sleep 1
+done
 
 if [ -z "$URL" ]; then
   echo "ERROR: cloudflared journal에서 trycloudflare URL을 찾을 수 없습니다." >&2
-  echo "       서비스 상태 확인: sudo systemctl status cloudflared-tunnel" >&2
+  echo "       서비스 상태 확인: systemctl status cloudflared-tunnel" >&2
   exit 1
 fi
 
@@ -32,8 +43,35 @@ if ! curl -sf -m 5 -o /dev/null "$URL/api/claude"; then
   echo "WARN: $URL/api/claude 도달 실패 — wrapper가 :3001에서 동작 중인지 확인" >&2
 fi
 
+# 이미 같은 URL이면 sed 자체는 idempotent하지만 mtime이 바뀌니 미리 확인
+CURRENT=$(grep -oE "window\\.CLAUDE_WRAPPER_URL\\s*=\\s*'[^']+'" "$INDEX_HTML" \
+  | grep -oE "https://[a-zA-Z0-9.-]+\\.trycloudflare\\.com" || true)
+if [ "$CURRENT" = "$URL" ]; then
+  echo "CLAUDE_WRAPPER_URL already up-to-date: $URL"
+  exit 0
+fi
+
 # index.html 한 줄 교체
 sed -i -E "s|window\\.CLAUDE_WRAPPER_URL\\s*=\\s*'[^']+'|window.CLAUDE_WRAPPER_URL = '$URL'|" "$INDEX_HTML"
 
 echo "updated CLAUDE_WRAPPER_URL → $URL"
-echo "$INDEX_HTML 변경됨. git add/commit 후 배포(GitHub Pages) 필요."
+
+# Auto-commit/push: index.html 한 파일만 origin/main에 반영해 GitHub Pages 재배포 트리거.
+# 실패해도 wrapper/cloudflared는 계속 동작해야 하므로 stderr 경고 후 0 반환.
+REPO_DIR="/home/ec2-user/Actuarial-Report"
+HOSTNAME_PART="${URL#https://}"
+HOSTNAME_PART="${HOSTNAME_PART%%.*}"
+
+if cd "$REPO_DIR" 2>/dev/null && git diff --quiet -- index.html; then
+  : # index.html 실제 변경 없음 (이론적으로 도달 불가하지만 안전장치)
+elif cd "$REPO_DIR" 2>/dev/null; then
+  if git commit -m "chore: auto-sync CLAUDE_WRAPPER_URL → $HOSTNAME_PART" -- index.html >/dev/null 2>&1; then
+    if git push origin main >/tmp/url-sync-push.log 2>&1; then
+      echo "git push success → origin/main"
+    else
+      echo "WARN: git push 실패 (로그: /tmp/url-sync-push.log)" >&2
+    fi
+  else
+    echo "WARN: git commit 실패 — index.html 수동 확인 필요" >&2
+  fi
+fi
